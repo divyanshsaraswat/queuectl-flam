@@ -40,27 +40,102 @@ git clone <repository-url>
 cd flam-submission
 ```
 
-### 2. Install Dependencies
+### 2. Create and Activate Virtual Environment
+
+It's recommended to use a virtual environment to isolate dependencies. Follow the instructions for your platform:
+
+#### Windows (PowerShell)
+
+```powershell
+# Create virtual environment
+python -m venv venv
+
+# Activate virtual environment
+.\venv\Scripts\Activate.ps1
+```
+
+If you get an execution policy error, run:
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+#### Windows (CMD)
+
+```cmd
+rem Create virtual environment
+python -m venv venv
+
+rem Activate virtual environment
+venv\Scripts\activate.bat
+```
+
+#### Linux / macOS
+
+```bash
+# Create virtual environment
+python3 -m venv venv
+
+# Activate virtual environment
+source venv/bin/activate
+```
+
+**Note**: After activation, your prompt should show `(venv)` prefix.
+
+### 3. Install Dependencies
+
+Once the virtual environment is activated, install the required packages:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Make CLI Executable (Optional)
+Or upgrade pip first (recommended):
 
-On Unix/Linux/Mac:
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### 4. Verify Installation
+
+Test that the CLI is working:
+
+```bash
+python queuectl.py --help
+```
+
+You should see the QueueCTL help menu.
+
+### 5. Make CLI Executable (Optional - Unix/Linux/macOS only)
+
+On Unix/Linux/Mac, you can make the script executable:
+
 ```bash
 chmod +x queuectl.py
 ```
 
-On Windows, you can use:
+Then you can run it directly:
 ```bash
-python queuectl.py <command>
+./queuectl.py --help
 ```
 
-Or install as a package:
+### 6. Install as Package (Optional)
+
+Alternatively, you can install QueueCTL as a package:
+
 ```bash
 pip install -e .
+```
+
+This allows you to use `queuectl` command directly (if entry point is configured).
+
+### Deactivating Virtual Environment
+
+When you're done working with the project, you can deactivate the virtual environment:
+
+```bash
+# On all platforms (once activated)
+deactivate
 ```
 
 ## 💻 Usage Examples
