@@ -7,6 +7,8 @@ import os
 import multiprocessing
 import signal
 import time
+import subprocess
+import platform
 from typing import Optional
 from .storage import JobStorage
 from .config import Config
@@ -15,7 +17,7 @@ from .worker import Worker
 
 # Global storage and config instances
 storage = None
-config = None
+_config_instance = None
 worker_processes = []
 
 
@@ -29,10 +31,10 @@ def get_storage():
 
 def get_config():
     """Get or create config instance"""
-    global config
-    if config is None:
-        config = Config()
-    return config
+    global _config_instance
+    if _config_instance is None:
+        _config_instance = Config()
+    return _config_instance
 
 
 def generate_job_id() -> str:
@@ -55,30 +57,60 @@ def enqueue(job_data: Optional[str]):
     
     JOB_DATA: JSON string with job details (id, command, max_retries)
     
-    Example: queuectl enqueue '{"id":"job1","command":"sleep 2","max_retries":3}'
+    Examples:
+      Linux/Mac:   queuectl enqueue '{"id":"job1","command":"sleep 2","max_retries":3}'
+      PowerShell:  queuectl enqueue "{\"id\":\"job1\",\"command\":\"sleep 2\",\"max_retries\":3}"
+      CMD:         queuectl enqueue "{\"id\":\"job1\",\"command\":\"sleep 2\",\"max_retries\":3}"
     """
     storage = get_storage()
-    cfg = get_config()
+    config_obj = get_config()
     
     if job_data:
+        # Try to fix common PowerShell quoting issues
+        # PowerShell strips quotes from single-quoted strings, so we might get {id:value} instead of {"id":"value"}
+        job_data_fixed = job_data
+        
+        # If it looks like PowerShell-stripped quotes (no quotes around keys/string values), try to fix it
+        if '{' in job_data and '}' in job_data and '"' not in job_data:
+            # Try to reconstruct JSON from PowerShell-style format: {id:value,command:value}
+            import re
+            # Reconstruct JSON by adding quotes around keys and values
+            # Handle pattern: {id:value,command:value with spaces,max_retries:3}
+            def fix_json_match(m):
+                key = m.group(1)
+                value = m.group(2).strip()
+                # If value is numeric, don't quote it
+                if value.isdigit() or (value.replace('.', '', 1).isdigit() and value.count('.') == 1):
+                    return f'"{key}":{value}'
+                else:
+                    return f'"{key}":"{value}"'
+            
+            # Match key:value pairs, handling commas and spaces
+            job_data_fixed = re.sub(r'(\w+):([^,}]+)', fix_json_match, job_data)
+        
         try:
-            job_dict = json.loads(job_data)
+            job_dict = json.loads(job_data_fixed)
             job_id = job_dict.get('id') or generate_job_id()
             command = job_dict.get('command')
-            max_retries = job_dict.get('max_retries', cfg.get('max_retries', 3))
+            max_retries = job_dict.get('max_retries', config_obj.get('max_retries', 3))
             
             if not command:
                 click.echo("Error: 'command' field is required", err=True)
                 sys.exit(1)
             
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
             click.echo("Error: Invalid JSON format", err=True)
+            click.echo(f"Received: {repr(job_data)}", err=True)
+            click.echo("\nPowerShell users: Use double quotes and escape internal quotes:", err=True)
+            click.echo('  queuectl enqueue "{\\"id\\":\\"job1\\",\\"command\\":\\"echo hello\\",\\"max_retries\\":3}"', err=True)
+            click.echo("\nOr use interactive mode:", err=True)
+            click.echo("  queuectl enqueue", err=True)
             sys.exit(1)
     else:
         # Interactive mode
         job_id = click.prompt("Job ID", default=generate_job_id())
         command = click.prompt("Command")
-        max_retries = click.prompt("Max retries", default=cfg.get('max_retries', 3), type=int)
+        max_retries = click.prompt("Max retries", default=config_obj.get('max_retries', 3), type=int)
     
     job = storage.create_job(job_id, command, max_retries)
     click.echo(f"Job enqueued: {job_id}")
@@ -153,26 +185,56 @@ def stop():
         click.echo("No workers running")
         return
     
-    # Send SIGTERM to all workers
+    # Send stop signal to all workers (cross-platform)
     stopped = 0
+    is_windows = platform.system() == 'Windows'
+    
     for pid in pids:
         try:
-            os.kill(pid, signal.SIGTERM)
+            if is_windows:
+                # Windows: Use taskkill to terminate gracefully first
+                try:
+                    # Try graceful termination first (without /F flag)
+                    result = subprocess.run(['taskkill', '/PID', str(pid)], 
+                                          capture_output=True, timeout=5)
+                    if result.returncode != 0:
+                        # If graceful failed, try force kill
+                        subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+                                     capture_output=True, timeout=5)
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
+                    # taskkill not available, try os.kill with available signals
+                    try:
+                        os.kill(pid, signal.SIGTERM if hasattr(signal, 'SIGTERM') else signal.SIGINT)
+                    except (OSError, AttributeError):
+                        pass
+            else:
+                # Unix/Linux/Mac: Use SIGTERM
+                os.kill(pid, signal.SIGTERM)
             stopped += 1
             click.echo(f"Sent stop signal to worker (PID: {pid})")
-        except OSError as e:
+        except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError) as e:
             click.echo(f"Worker (PID: {pid}) not found: {e}")
     
     # Wait a bit for graceful shutdown
     time.sleep(2)
     
-    # Force kill if still running
+    # Force kill if still running (cross-platform)
     for pid in pids:
         try:
             os.kill(pid, 0)  # Check if alive
-            os.kill(pid, signal.SIGKILL)
-            click.echo(f"Force killed worker (PID: {pid})")
-        except OSError:
+            if is_windows:
+                # Windows: Use taskkill to force kill
+                try:
+                    subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+                                  capture_output=True, timeout=5)
+                    click.echo(f"Force killed worker (PID: {pid})")
+                except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+                    pass
+            else:
+                # Unix/Linux/Mac: Use SIGKILL
+                os.kill(pid, signal.SIGKILL)
+                click.echo(f"Force killed worker (PID: {pid})")
+        except (OSError, subprocess.TimeoutExpired, subprocess.SubprocessError):
             pass
     
     # Remove PID file
@@ -195,8 +257,9 @@ def status():
     click.echo(f"Failed: {stats['failed']}")
     click.echo(f"Dead (DLQ): {stats['dead']}")
     
-    # Check active workers
+    # Check active workers (cross-platform)
     pid_file = "queuectl.workers.pid"
+    is_windows = platform.system() == 'Windows'
     if os.path.exists(pid_file):
         with open(pid_file, 'r') as f:
             pids = [int(pid) for pid in f.read().strip().split('\n') if pid]
@@ -204,7 +267,7 @@ def status():
         alive_workers = 0
         for pid in pids:
             try:
-                os.kill(pid, 0)
+                os.kill(pid, 0)  # Works on both Windows and Unix
                 alive_workers += 1
             except OSError:
                 pass

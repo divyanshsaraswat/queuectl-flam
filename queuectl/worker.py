@@ -4,6 +4,7 @@ import subprocess
 import time
 import signal
 import sys
+import platform
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from .storage import JobStorage
@@ -20,9 +21,16 @@ class Worker:
         self.running = False
         self.current_job_id: Optional[str] = None
         
-        # Setup signal handlers for graceful shutdown
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
+        # Setup signal handlers for graceful shutdown (cross-platform)
+        if platform.system() != 'Windows':
+            # Unix/Linux/Mac: Use SIGINT and SIGTERM
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        else:
+            # Windows: Only SIGINT is available, SIGBREAK is Windows-specific
+            signal.signal(signal.SIGINT, self._signal_handler)
+            if hasattr(signal, 'SIGBREAK'):
+                signal.signal(signal.SIGBREAK, self._signal_handler)
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""

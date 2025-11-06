@@ -18,6 +18,19 @@ A CLI-based background job queue system with worker processes, automatic retries
 - Python 3.8 or higher
 - pip (Python package manager)
 
+### Platform Support
+
+QueueCTL is **cross-platform** and works on:
+- ✅ **Windows** (PowerShell, CMD)
+- ✅ **Linux** (bash, zsh, etc.)
+- ✅ **macOS** (bash, zsh, etc.)
+
+The CLI automatically handles shell-specific differences:
+- **PowerShell**: Auto-fixes single-quote JSON format (`{id:value,command:value}`)
+- **Bash/Unix shells**: Standard JSON format (`{"id":"value","command":"value"}`)
+- **Command execution**: Uses platform-appropriate shell (`cmd.exe` on Windows, `bash` on Unix)
+- **Signal handling**: Platform-specific graceful shutdown (SIGTERM on Unix, taskkill on Windows)
+
 ## 🛠️ Setup Instructions
 
 ### 1. Clone the Repository
@@ -57,12 +70,17 @@ pip install -e .
 #### Enqueue a Job
 
 ```bash
-# Enqueue with JSON data
+# Linux/Mac - Enqueue with JSON data
 python queuectl.py enqueue '{"id":"job1","command":"echo Hello World","max_retries":3}'
+
+# PowerShell - Single quotes (auto-fixed format)
+python queuectl.py enqueue '{id:job1,command:echo Hello World,max_retries:3}'
 
 # Interactive mode (if no JSON provided)
 python queuectl.py enqueue
 ```
+
+**Note for PowerShell users**: The CLI automatically fixes PowerShell's single-quote format where quotes are stripped. You can use the simpler format `{id:value,command:value}` instead of escaping quotes.
 
 #### Start Workers
 
