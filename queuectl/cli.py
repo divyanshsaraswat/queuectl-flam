@@ -37,6 +37,14 @@ def get_config():
     return _config_instance
 
 
+def _worker_process_func(worker_id: int):
+    """Worker process function - must be at module level for Windows multiprocessing"""
+    storage = get_storage()
+    cfg = get_config()
+    worker = Worker(worker_id, storage, cfg)
+    worker.run()
+
+
 def generate_job_id() -> str:
     """Generate a unique job ID"""
     import uuid
@@ -153,11 +161,7 @@ def start(count: int):
     # Start workers
     processes = []
     for i in range(count):
-        def worker_func(worker_id):
-            worker = Worker(worker_id, storage, cfg)
-            worker.run()
-        
-        p = multiprocessing.Process(target=worker_func, args=(i + 1,))
+        p = multiprocessing.Process(target=_worker_process_func, args=(i + 1,))
         p.start()
         processes.append(p)
         click.echo(f"Started worker {i + 1} (PID: {p.pid})")
