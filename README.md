@@ -5,7 +5,6 @@ A CLI-based background job queue system with worker processes, automatic retries
 ## 📹 Demo
 [![Watch the demo](https://media.istockphoto.com/id/1206928671/video/clicking-play-and-stop-button-on-computer-screen-animation-animation.jpg?s=640x640&k=20&c=US4VXh4Wjs24enscd1tI9y5qgZE-OUoqDzF_8Ci11U8=)](https://vimeo.com/1134906079)
 
-A working CLI demo has been recorded and can be accessed via the provided link in the repository (if applicable).
 ## 🚀 Features
 
 - **Job Management**: Enqueue, monitor, and manage background jobs
