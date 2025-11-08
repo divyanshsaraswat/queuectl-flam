@@ -143,16 +143,23 @@ class JobStorage:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
+            
+            # Get current UTC time in ISO format for comparison
+            now_utc = datetime.utcnow().isoformat() + "Z"
+            
+            # SQLite can compare ISO format strings directly, but we need to ensure
+            # we're comparing UTC times. Since next_retry_at is stored in UTC (ISO with Z),
+            # we compare it with current UTC time
             cursor.execute("""
                 SELECT * FROM jobs 
                 WHERE state = 'pending' 
-                AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
-                AND (run_at IS NULL OR run_at <= datetime('now'))
+                AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                AND (run_at IS NULL OR run_at <= ?)
                 ORDER BY priority DESC, 
                          CASE WHEN run_at IS NULL THEN 1 ELSE 0 END,
                          run_at ASC, 
                          created_at ASC
-            """)
+            """, (now_utc, now_utc))
             rows = cursor.fetchall()
             conn.close()
             

@@ -14,6 +14,24 @@ from .storage import JobStorage, DuplicateJobError
 from .config import Config
 from .worker import Worker
 
+# Configure multiprocessing for Windows compatibility
+# Use a context manager to ensure proper setup
+_mp_context = None
+if platform.system() == 'Windows':
+    # On Windows, use 'spawn' method explicitly
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+        _mp_context = multiprocessing.get_context('spawn')
+    except RuntimeError:
+        # Start method already set, use existing context
+        try:
+            _mp_context = multiprocessing.get_context()
+        except:
+            _mp_context = multiprocessing
+else:
+    # On Unix-like systems, use default (usually 'fork')
+    _mp_context = multiprocessing
+
 
 # Global storage and config instances
 storage = None
@@ -177,19 +195,56 @@ def start(count: int):
             click.echo("Use 'queuectl worker stop' to stop them first")
             return
     
-    # Start workers
+    # Start workers using the appropriate multiprocessing context
     processes = []
-    for i in range(count):
-        p = multiprocessing.Process(target=_worker_process_func, args=(i + 1,))
-        p.start()
-        processes.append(p)
-        click.echo(f"Started worker {i + 1} (PID: {p.pid})")
-    
-    # Save PIDs
-    with open(pid_file, 'w') as f:
-        f.write('\n'.join(str(p.pid) for p in processes))
-    
-    click.echo(f"\nStarted {count} worker(s). Use 'queuectl worker stop' to stop them.")
+    try:
+        for i in range(count):
+            # Use the context to create processes (handles Windows 'spawn' properly)
+            p = _mp_context.Process(target=_worker_process_func, args=(i + 1,))
+            p.daemon = False  # Don't make daemon so they persist after parent exits
+            p.start()
+            processes.append(p)
+            click.echo(f"Started worker {i + 1} (PID: {p.pid})")
+            sys.stdout.flush()  # Ensure output is flushed immediately
+            # On Windows, give the process a moment to initialize
+            if platform.system() == 'Windows':
+                time.sleep(0.15)  # Brief delay for Windows spawn initialization
+        
+        # Verify processes are still alive after a brief moment
+        # Shorter wait to return quickly, but enough for Windows spawn
+        time.sleep(0.2)
+        alive_processes = [p for p in processes if p.is_alive()]
+        
+        if len(alive_processes) < count:
+            click.echo(f"Warning: Only {len(alive_processes)}/{count} workers started successfully", err=True)
+            sys.stderr.flush()  # Ensure error output is flushed immediately
+            # Still save the PIDs of alive processes
+            if alive_processes:
+                with open(pid_file, 'w') as f:
+                    f.write('\n'.join(str(p.pid) for p in alive_processes))
+            sys.exit(1)
+        
+        # Save PIDs
+        with open(pid_file, 'w') as f:
+            f.write('\n'.join(str(p.pid) for p in alive_processes))
+        
+        click.echo(f"\nStarted {len(alive_processes)} worker(s). Use 'queuectl worker stop' to stop them.")
+        sys.stdout.flush()  # Ensure output is flushed immediately
+    except Exception as e:
+        click.echo(f"Error starting workers: {e}", err=True)
+        import traceback
+        click.echo(traceback.format_exc(), err=True)
+        # Clean up any processes that were started
+        for p in processes:
+            try:
+                if p.is_alive():
+                    p.terminate()
+                    p.join(timeout=1)
+                    if p.is_alive():
+                        p.kill()
+            except:
+                pass
+        sys.exit(1)
 
 
 @worker.command()

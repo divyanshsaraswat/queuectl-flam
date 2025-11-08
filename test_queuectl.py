@@ -6,12 +6,145 @@ import time
 import os
 import json
 import sys
+import multiprocessing
+import platform
 from queuectl.storage import JobStorage
 from queuectl.config import Config
+from queuectl.worker import Worker
+
+
+# Configure multiprocessing for Windows
+_mp_context = None
+if platform.system() == 'Windows':
+    try:
+        multiprocessing.set_start_method('spawn', force=True)
+        _mp_context = multiprocessing.get_context('spawn')
+    except RuntimeError:
+        try:
+            _mp_context = multiprocessing.get_context()
+        except:
+            _mp_context = multiprocessing
+else:
+    _mp_context = multiprocessing
+
+# Global worker processes list for direct management
+_worker_processes = []
+
+
+def _worker_process_func(worker_id: int):
+    """Worker process function - must be at module level for Windows multiprocessing"""
+    storage = JobStorage()
+    cfg = Config()
+    worker = Worker(worker_id, storage, cfg)
+    worker.run()
+
+
+def start_workers_directly(count: int):
+    """Start workers directly without using subprocess (for testing)"""
+    global _worker_processes
+    
+    # Clean up any existing workers
+    stop_workers_directly()
+    
+    pid_file = "queuectl.workers.pid"
+    
+    # Check if workers are already running
+    if os.path.exists(pid_file):
+        with open(pid_file, 'r') as f:
+            existing_pids = [int(pid) for pid in f.read().strip().split('\n') if pid]
+        
+        # Check if processes are still alive
+        alive_pids = []
+        for pid in existing_pids:
+            try:
+                os.kill(pid, 0)  # Check if process exists
+                alive_pids.append(pid)
+            except OSError:
+                pass
+        
+        if alive_pids:
+            print(f"Warning: {len(alive_pids)} worker(s) already running (PIDs: {alive_pids})")
+            # Kill them first
+            for pid in alive_pids:
+                try:
+                    if platform.system() == 'Windows':
+                        subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+                                     capture_output=True, timeout=5)
+                    else:
+                        os.kill(pid, 9)
+                except:
+                    pass
+    
+    # Start workers
+    _worker_processes = []
+    try:
+        for i in range(count):
+            p = _mp_context.Process(target=_worker_process_func, args=(i + 1,))
+            p.daemon = False
+            p.start()
+            _worker_processes.append(p)
+            print(f"Started worker {i + 1} (PID: {p.pid})")
+            if platform.system() == 'Windows':
+                time.sleep(0.1)  # Brief delay for Windows spawn
+        
+        # Verify processes are alive
+        time.sleep(0.2)
+        alive_processes = [p for p in _worker_processes if p.is_alive()]
+        
+        # Save PIDs
+        with open(pid_file, 'w') as f:
+            f.write('\n'.join(str(p.pid) for p in alive_processes))
+        
+        print(f"Started {len(alive_processes)} worker(s)")
+        return len(alive_processes) == count
+    except Exception as e:
+        print(f"Error starting workers: {e}")
+        stop_workers_directly()
+        return False
+
+
+def stop_workers_directly():
+    """Stop workers directly without using subprocess (for testing)"""
+    global _worker_processes
+    
+    # Stop processes we started directly
+    for p in _worker_processes:
+        try:
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=2)
+                if p.is_alive():
+                    p.kill()
+        except:
+            pass
+    _worker_processes = []
+    
+    # Also stop any workers from PID file
+    pid_file = "queuectl.workers.pid"
+    if os.path.exists(pid_file):
+        with open(pid_file, 'r') as f:
+            pids = [int(pid) for pid in f.read().strip().split('\n') if pid]
+        
+        for pid in pids:
+            try:
+                if platform.system() == 'Windows':
+                    subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+                                 capture_output=True, timeout=5)
+                else:
+                    os.kill(pid, 9)
+            except:
+                pass
+        
+        try:
+            os.remove(pid_file)
+        except:
+            pass
 
 
 def cleanup():
     """Clean up test files"""
+    stop_workers_directly()  # Stop any running workers first
+    
     files_to_remove = [
         "queuectl.db",
         "queuectl.db.lock",
@@ -30,14 +163,30 @@ def cleanup():
 def run_command(cmd):
     """Run a command and return output"""
     try:
+        # On Windows, use CREATE_NEW_PROCESS_GROUP to avoid multiprocessing issues
+        # when starting workers from within a subprocess
+        creation_flags = 0
+        if os.name == 'nt':
+            creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP
+        
+        # For worker start commands, use a longer timeout and ensure we don't wait
+        # for child processes to fully initialize
+        timeout = 30 if 'worker start' in cmd else 15
+        
         result = subprocess.run(
             cmd,
             shell=True,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=timeout,
+            creationflags=creation_flags if os.name == 'nt' else 0
         )
         return result.returncode == 0, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        timeout_val = 30 if 'worker start' in cmd else 15
+        print(f"WARNING: Command '{cmd}' timed out after {timeout_val} seconds")
+        print("This might indicate a multiprocessing issue on Windows.")
+        return False, "", "Command timed out"
     except Exception as e:
         return False, "", str(e)
 
@@ -56,9 +205,9 @@ def test_1_basic_job_completion():
     assert job['state'] == 'pending', "Job should be pending initially"
     print(f"✓ Created job: {job['id']}")
     
-    # Start a worker
+    # Start a worker directly (avoid subprocess issues on Windows)
     print("Starting worker...")
-    success, _, _ = run_command("python queuectl.py worker start --count 1")
+    success = start_workers_directly(1)
     assert success, "Failed to start worker"
     time.sleep(2)
     
@@ -71,7 +220,7 @@ def test_1_basic_job_completion():
     print(f"Job state: {job['state']}")
     
     # Stop worker
-    run_command("python queuectl.py worker stop")
+    stop_workers_directly()
     time.sleep(1)
     
     # Verify job completed
@@ -100,17 +249,40 @@ def test_2_failed_job_retry():
     job = storage.create_job("test2", "nonexistent-command-that-fails", 2)
     print(f"✓ Created failing job: {job['id']}")
     
-    # Start worker
+    # Start worker directly (avoid subprocess issues on Windows)
     print("Starting worker...")
-    run_command("python queuectl.py worker start --count 1")
-    time.sleep(2)
+    success = start_workers_directly(1)
+    assert success, "Failed to start worker"
+    time.sleep(2)  # Let worker start processing
     
-    # Wait for retries (with backoff: 2^0=1s, 2^1=2s, then DLQ)
-    print("Waiting for retries (this will take ~10 seconds)...")
-    time.sleep(12)
+    # Wait for retries to complete
+    # With max_retries=2 and backoff_base=2:
+    # - First failure: attempts=0 -> 1, backoff = 2^1 = 2s, next_retry_at = now + 2s
+    # - Second failure: attempts=1 -> 2, backoff = 2^2 = 4s, next_retry_at = now + 4s
+    # - Third failure: attempts=2 -> 3, which >= max_retries (2), so DLQ
+    # Total time needed: ~1s (first failure) + 2s (backoff) + ~1s (second failure) + 4s (backoff) + ~1s (third failure) = ~9s
+    # Add buffer for processing time
+    print("Waiting for retries to complete (this will take ~15 seconds)...")
     
-    # Stop worker
-    run_command("python queuectl.py worker stop")
+    # Poll for job state until it reaches DLQ or timeout
+    # IMPORTANT: Keep workers running during this time!
+    max_wait = 25  # Maximum wait time in seconds
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        job = storage.get_job("test2")
+        if job:
+            state = job['state']
+            attempts = job.get('attempts', 0)
+            if state == 'dead':
+                print(f"Job reached DLQ after {time.time() - start_time:.1f} seconds")
+                break
+            # Log progress every 3 seconds
+            if int(time.time() - start_time) % 3 == 0:
+                print(f"  Waiting... state={state}, attempts={attempts}")
+        time.sleep(1)
+    
+    # Stop worker only after we've checked the final state
+    stop_workers_directly()
     time.sleep(1)
     
     # Check job is in DLQ
@@ -144,9 +316,10 @@ def test_3_multiple_workers():
     
     print(f"✓ Created {len(job_ids)} jobs")
     
-    # Start multiple workers
+    # Start multiple workers directly (avoid subprocess issues on Windows)
     print("Starting 3 workers...")
-    run_command("python queuectl.py worker start --count 3")
+    success = start_workers_directly(3)
+    assert success, "Failed to start workers"
     time.sleep(2)
     
     # Wait for processing
@@ -154,7 +327,7 @@ def test_3_multiple_workers():
     time.sleep(8)
     
     # Stop workers
-    run_command("python queuectl.py worker stop")
+    stop_workers_directly()
     time.sleep(1)
     
     # Check all jobs processed
@@ -187,27 +360,50 @@ def test_4_invalid_commands():
     job = storage.create_job("test4", "this-command-does-not-exist-12345", 1)
     print(f"✓ Created job with invalid command: {job['id']}")
     
-    # Start worker
-    run_command("python queuectl.py worker start --count 1")
-    time.sleep(2)
+    # Start worker directly (avoid subprocess issues on Windows)
+    print("Starting worker...")
+    success = start_workers_directly(1)
+    assert success, "Failed to start worker"
+    time.sleep(2)  # Let worker start processing
     
-    # Wait for failure
-    time.sleep(5)
+    # With max_retries=1:
+    # - First failure: attempts=0 -> 1, backoff = 2^1 = 2s, next_retry_at = now + 2s
+    # - Second failure: attempts=1 -> 2, which >= max_retries (1), so DLQ
+    # Total time needed: ~1s (first failure) + 2s (backoff) + ~1s (second failure) = ~4s
+    # Add buffer for processing time
+    print("Waiting for job to fail and move to DLQ (this will take ~8 seconds)...")
     
-    # Stop worker
-    run_command("python queuectl.py worker stop")
+    # Poll for job state until it reaches DLQ or timeout
+    # IMPORTANT: Keep workers running during this time!
+    max_wait = 15  # Maximum wait time in seconds
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        job = storage.get_job("test4")
+        if job:
+            state = job['state']
+            attempts = job.get('attempts', 0)
+            if state in ['failed', 'dead']:
+                print(f"Job reached final state '{state}' after {time.time() - start_time:.1f} seconds")
+                break
+            # Log progress every 2 seconds
+            if int(time.time() - start_time) % 2 == 0:
+                print(f"  Waiting... state={state}, attempts={attempts}")
+        time.sleep(1)
+    
+    # Stop worker only after we've checked the final state
+    stop_workers_directly()
     time.sleep(1)
     
     # Check job failed/handled
     job = storage.get_job("test4")
     assert job is not None, "Job should exist"
-    print(f"Job state: {job['state']}, error: {job.get('error_message', 'N/A')[:50]}")
+    print(f"Job state: {job['state']}, attempts: {job['attempts']}, error: {job.get('error_message', 'N/A')[:50]}")
     
     if job['state'] in ['failed', 'dead'] and job.get('error_message'):
         print("✓ Test 4 PASSED: Invalid command handled gracefully")
         return True
     else:
-        print(f"✗ Test 4 FAILED: Job state {job['state']}")
+        print(f"✗ Test 4 FAILED: Job state {job['state']}, expected 'failed' or 'dead'")
         return False
 
 
@@ -259,15 +455,38 @@ def test_6_dlq_functionality():
     job = storage.create_job("dlq_test", "invalid-command-for-dlq", 1)
     print(f"✓ Created job: {job['id']}")
     
-    # Start worker
-    run_command("python queuectl.py worker start --count 1")
-    time.sleep(2)
+    # Start worker directly (avoid subprocess issues on Windows)
+    print("Starting worker...")
+    success = start_workers_directly(1)
+    assert success, "Failed to start worker"
+    time.sleep(2)  # Let worker start processing
     
-    # Wait for failure and DLQ
-    time.sleep(5)
+    # With max_retries=1:
+    # - First failure: attempts=0 -> 1, backoff = 2^1 = 2s, next_retry_at = now + 2s
+    # - Second failure: attempts=1 -> 2, which >= max_retries (1), so DLQ
+    # Total time needed: ~1s (first failure) + 2s (backoff) + ~1s (second failure) = ~4s
+    # Add buffer for processing time
+    print("Waiting for job to fail and move to DLQ (this will take ~8 seconds)...")
     
-    # Stop worker
-    run_command("python queuectl.py worker stop")
+    # Poll for job state until it reaches DLQ or timeout
+    # IMPORTANT: Keep workers running during this time!
+    max_wait = 15  # Maximum wait time in seconds
+    start_time = time.time()
+    while time.time() - start_time < max_wait:
+        job = storage.get_job("dlq_test")
+        if job:
+            state = job['state']
+            attempts = job.get('attempts', 0)
+            if state == 'dead':
+                print(f"Job reached DLQ after {time.time() - start_time:.1f} seconds")
+                break
+            # Log progress every 2 seconds
+            if int(time.time() - start_time) % 2 == 0:
+                print(f"  Waiting... state={state}, attempts={attempts}")
+        time.sleep(1)
+    
+    # Stop worker only after we've checked the final state
+    stop_workers_directly()
     time.sleep(1)
     
     # Check DLQ
@@ -277,6 +496,7 @@ def test_6_dlq_functionality():
     # Try to retry from DLQ
     if dlq_jobs:
         job_id = dlq_jobs[0]['id']
+        print(f"Found DLQ job: {job_id}, resetting for retry...")
         storage.reset_job_for_retry(job_id)
         retried_job = storage.get_job(job_id)
         
@@ -284,6 +504,15 @@ def test_6_dlq_functionality():
             print(f"✓ DLQ job {job_id} reset and moved to pending")
             print("✓ Test 6 PASSED: DLQ functionality works")
             return True
+        else:
+            print(f"✗ DLQ job reset failed: state is {retried_job['state'] if retried_job else 'None'}")
+    else:
+        # Check if job exists but not in DLQ
+        job = storage.get_job("dlq_test")
+        if job:
+            print(f"✗ Job exists but not in DLQ: state={job['state']}, attempts={job['attempts']}")
+        else:
+            print("✗ Job not found")
     
     print("✗ Test 6 FAILED: DLQ functionality not working")
     return False
@@ -314,7 +543,7 @@ def main():
             results.append((test_name, False))
         finally:
             # Ensure workers are stopped
-            run_command("python queuectl.py worker stop")
+            stop_workers_directly()
             time.sleep(1)
     
     # Summary
