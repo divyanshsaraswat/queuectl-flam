@@ -1,7 +1,11 @@
 # QueueCTL - Background Job Queue System
 
 A CLI-based background job queue system with worker processes, automatic retries with exponential backoff, and Dead Letter Queue (DLQ) support.
+---
+## 📹 Demo
+<iframe src="[https://player.vimeo.com/video/1134906079](https://vimeo.com/1134906079?share=copy&fl=sv&fe=ci )" width="640" height="360" frameborder="0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
 
+A working CLI demo has been recorded and can be accessed via the provided link in the repository (if applicable).
 ## 🚀 Features
 
 - **Job Management**: Enqueue, monitor, and manage background jobs
@@ -496,7 +500,5 @@ Created as part of QueueCTL Backend Developer Internship Assignment.
 - [x] Code structured with clear separation of concerns
 - [x] Test script to validate core flows
 
-## 📹 Demo
 
-A working CLI demo has been recorded and can be accessed via the provided link in the repository (if applicable).
 
