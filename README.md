@@ -3,7 +3,7 @@
 A CLI-based background job queue system with worker processes, automatic retries with exponential backoff, and Dead Letter Queue (DLQ) support.
 ---
 ## 📹 Demo
-<iframe src="[https://player.vimeo.com/video/1134906079](https://vimeo.com/1134906079?share=copy&fl=sv&fe=ci )" width="640" height="360" frameborder="0" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
+[![Watch the demo](https://media.istockphoto.com/id/1206928671/video/clicking-play-and-stop-button-on-computer-screen-animation-animation.jpg?s=640x640&k=20&c=US4VXh4Wjs24enscd1tI9y5qgZE-OUoqDzF_8Ci11U8=)](https://vimeo.com/1134906079)
 
 A working CLI demo has been recorded and can be accessed via the provided link in the repository (if applicable).
 ## 🚀 Features
