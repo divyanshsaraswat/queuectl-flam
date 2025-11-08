@@ -11,7 +11,8 @@ A CLI-based background job queue system with worker processes, automatic retries
 - **Persistent Storage**: SQLite-based persistence across restarts
 - **Concurrency Safety**: Locking mechanism prevents duplicate job processing
 - **Graceful Shutdown**: Workers finish current jobs before stopping
-- **Configuration Management**: Adjustable retry count and backoff settings
+- **Configuration Management**: Adjustable retry count, backoff settings, and default timeout
+- **Duplicate Job ID Prevention**: User-friendly error messages when attempting to enqueue jobs with existing IDs
 
 ## 📋 Requirements
 
@@ -157,6 +158,8 @@ python queuectl.py enqueue
 
 **Note for PowerShell users**: The CLI automatically fixes PowerShell's single-quote format where quotes are stripped. You can use the simpler format `{id:value,command:value}` instead of escaping quotes.
 
+**Duplicate Job ID Handling**: If you attempt to enqueue a job with an ID that already exists, you'll receive a clear error message indicating the job ID is already in use and its current state. This prevents accidental overwrites and helps maintain job integrity.
+
 #### Start Workers
 
 ```bash
@@ -228,6 +231,9 @@ python queuectl.py config set max-retries 5
 
 # Set backoff base (for exponential backoff: delay = base^attempts)
 python queuectl.py config set backoff_base 3
+
+# Set default timeout for jobs (in seconds, default: 300)
+python queuectl.py config set default-timeout 600
 ```
 
 #### Get Configuration
@@ -286,6 +292,7 @@ pending → processing → completed
    - SQLite database for persistent job storage
    - File-based locking for concurrency control
    - Job state management and atomic operations
+   - Duplicate job ID detection with user-friendly error messages
 
 2. **Worker Module** (`queuectl/worker.py`)
    - Worker processes that execute jobs
@@ -297,6 +304,7 @@ pending → processing → completed
    - JSON-based configuration storage
    - Thread-safe configuration access
    - Default values and validation
+   - Configurable settings: max_retries, backoff_base, default_timeout
 
 4. **CLI Module** (`queuectl/cli.py`)
    - Command-line interface using Click
@@ -390,9 +398,10 @@ The test script validates:
 
 1. **Command Execution**: Commands are executed as shell commands (bash on Unix, cmd on Windows)
 2. **Exit Codes**: Success = exit code 0, failure = non-zero exit code
-3. **Timeout**: Jobs have a 5-minute execution timeout
+3. **Timeout**: Jobs have a configurable default timeout (default: 300 seconds / 5 minutes). Can be set per-job or globally via configuration.
 4. **Storage**: SQLite is sufficient for job persistence (not optimized for high-throughput)
 5. **Worker Management**: Workers are managed via PID files (simple approach)
+6. **Job ID Uniqueness**: Each job must have a unique ID. Attempting to enqueue a job with an existing ID will result in an error message showing the existing job's state.
 
 ### Trade-offs
 
@@ -456,6 +465,13 @@ flam-submission/
 - Stop all workers: `python queuectl.py worker stop`
 - Delete lock file: `rm queuectl.db.lock` (Unix) or delete manually (Windows)
 - Restart workers
+
+### Duplicate Job ID Error
+
+If you see an error like "Job with ID 'job1' already exists", it means a job with that ID is already in the queue. You can:
+- Use a different job ID
+- Check the existing job status: `python queuectl.py list`
+- If the job is completed or dead, you can use the same ID after removing it (if needed)
 
 ## 📄 License
 

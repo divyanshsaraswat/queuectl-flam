@@ -42,30 +42,44 @@ class Worker:
         base = self.config.get("backoff_base", 2)
         return base ** attempts
     
-    def _execute_command(self, command: str) -> Tuple[bool, str]:
-        """Execute a shell command and return (success, error_message)"""
+    def _execute_command(self, command: str, timeout: Optional[int] = None) -> Tuple[bool, str, str]:
+        """Execute a shell command and return (success, error_message, output_logs)"""
+        default_timeout = self.config.get("default_timeout", 300)  # Configurable default timeout
+        actual_timeout = timeout if timeout is not None else default_timeout
+        
         try:
             result = subprocess.run(
                 command,
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minute timeout
+                timeout=actual_timeout
             )
+            
+            # Combine stdout and stderr for logging
+            output_logs = ""
+            if result.stdout:
+                output_logs += f"STDOUT:\n{result.stdout}\n"
+            if result.stderr:
+                output_logs += f"STDERR:\n{result.stderr}\n"
+            
             if result.returncode == 0:
-                return True, ""
+                return True, "", output_logs.strip()
             else:
                 error_msg = result.stderr.strip() or f"Command failed with exit code {result.returncode}"
-                return False, error_msg
+                return False, error_msg, output_logs.strip()
         except subprocess.TimeoutExpired:
-            return False, "Command execution timeout (5 minutes)"
+            timeout_msg = f"Command execution timeout ({actual_timeout} seconds)"
+            return False, timeout_msg, f"STDERR:\n{timeout_msg}\n"
         except Exception as e:
-            return False, str(e)
+            error_msg = str(e)
+            return False, error_msg, f"STDERR:\n{error_msg}\n"
     
     def process_job(self, job: dict) -> bool:
         """Process a single job"""
         job_id = job['id']
         command = job['command']
+        timeout = job.get('timeout')
         
         # Try to claim the job atomically
         if not self.storage.claim_job(job_id):
@@ -74,13 +88,21 @@ class Worker:
         
         self.current_job_id = job_id
         print(f"[Worker {self.worker_id}] Processing job {job_id}: {command}")
+        if timeout:
+            print(f"[Worker {self.worker_id}] Job {job_id} timeout: {timeout} seconds")
+        
+        # Track execution time
+        start_time = time.time()
         
         # Execute the command
-        success, error_message = self._execute_command(command)
+        success, error_message, output_logs = self._execute_command(command, timeout)
+        
+        # Calculate execution time
+        execution_time = time.time() - start_time
         
         if success:
-            self.storage.complete_job(job_id)
-            print(f"[Worker {self.worker_id}] Job {job_id} completed successfully")
+            self.storage.complete_job(job_id, execution_time=execution_time, output_logs=output_logs)
+            print(f"[Worker {self.worker_id}] Job {job_id} completed successfully in {execution_time:.2f}s")
             self.current_job_id = None
             return True
         else:
@@ -99,8 +121,20 @@ class Worker:
                 print(f"[Worker {self.worker_id}] Job {job_id} failed (attempt {attempts + 1}/{max_retries}). "
                       f"Retrying in {delay_seconds:.1f} seconds. Error: {error_message}")
             else:
-                # Move to DLQ
+                # Move to DLQ - also save output logs for failed jobs
                 self.storage.fail_job(job_id, error_message, should_retry=False)
+                # Update output logs for failed job
+                with self.storage.lock:
+                    import sqlite3
+                    conn = sqlite3.connect(self.storage.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        UPDATE jobs 
+                        SET output_logs = ?, execution_time = ?
+                        WHERE id = ?
+                    """, (output_logs, execution_time, job_id))
+                    conn.commit()
+                    conn.close()
                 print(f"[Worker {self.worker_id}] Job {job_id} exhausted retries. Moved to DLQ. Error: {error_message}")
             
             self.current_job_id = None

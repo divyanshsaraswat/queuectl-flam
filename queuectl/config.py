@@ -15,7 +15,8 @@ class Config:
         self.lock = FileLock(self.lock_path, timeout=10)
         self.defaults = {
             "max_retries": 3,
-            "backoff_base": 2
+            "backoff_base": 2,
+            "default_timeout": 300  # 5 minutes default timeout
         }
         self._ensure_config_exists()
     

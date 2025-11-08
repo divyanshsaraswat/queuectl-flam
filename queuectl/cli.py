@@ -10,7 +10,7 @@ import time
 import subprocess
 import platform
 from typing import Optional
-from .storage import JobStorage
+from .storage import JobStorage, DuplicateJobError
 from .config import Config
 from .worker import Worker
 
@@ -63,12 +63,17 @@ def cli():
 def enqueue(job_data: Optional[str]):
     """Enqueue a new job to the queue
     
-    JOB_DATA: JSON string with job details (id, command, max_retries)
+    JOB_DATA: JSON string with job details (id, command, max_retries, priority, timeout, run_at)
     
     Examples:
-      Linux/Mac:   queuectl enqueue '{"id":"job1","command":"sleep 2","max_retries":3}'
-      PowerShell:  queuectl enqueue "{\"id\":\"job1\",\"command\":\"sleep 2\",\"max_retries\":3}"
+      Linux/Mac:   queuectl enqueue '{"id":"job1","command":"sleep 2","max_retries":3,"priority":5,"timeout":60}'
+      PowerShell:  queuectl enqueue "{\"id\":\"job1\",\"command\":\"sleep 2\",\"max_retries\":3,\"priority\":5}"
       CMD:         queuectl enqueue "{\"id\":\"job1\",\"command\":\"sleep 2\",\"max_retries\":3}"
+      
+    Optional fields:
+      - priority: Integer (higher = higher priority, default: 0)
+      - timeout: Integer seconds (default: 300)
+      - run_at: ISO datetime string for scheduled execution (e.g., "2024-01-01T12:00:00Z")
     """
     storage = get_storage()
     config_obj = get_config()
@@ -101,6 +106,9 @@ def enqueue(job_data: Optional[str]):
             job_id = job_dict.get('id') or generate_job_id()
             command = job_dict.get('command')
             max_retries = job_dict.get('max_retries', config_obj.get('max_retries', 3))
+            priority = job_dict.get('priority', 0)
+            timeout = job_dict.get('timeout')
+            run_at = job_dict.get('run_at')
             
             if not command:
                 click.echo("Error: 'command' field is required", err=True)
@@ -119,10 +127,21 @@ def enqueue(job_data: Optional[str]):
         job_id = click.prompt("Job ID", default=generate_job_id())
         command = click.prompt("Command")
         max_retries = click.prompt("Max retries", default=config_obj.get('max_retries', 3), type=int)
+        priority = click.prompt("Priority (higher = higher priority)", default=0, type=int)
+        timeout_input = click.prompt("Timeout in seconds (press Enter for default 300)", default="", show_default=False)
+        timeout = int(timeout_input) if timeout_input.isdigit() else None
+        run_at = click.prompt("Schedule for (ISO datetime, press Enter for immediate)", default="", show_default=False)
+        run_at = run_at if run_at else None
     
-    job = storage.create_job(job_id, command, max_retries)
-    click.echo(f"Job enqueued: {job_id}")
-    click.echo(json.dumps(job, indent=2))
+    try:
+        job = storage.create_job(job_id, command, max_retries, priority=priority, timeout=timeout, run_at=run_at)
+        click.echo(f"Job enqueued: {job_id}")
+        click.echo(json.dumps(job, indent=2))
+    except DuplicateJobError as e:
+        click.echo(f"Error: {str(e)}", err=True)
+        click.echo(f"Please use a different job ID or check the existing job using:", err=True)
+        click.echo(f"  queuectl list", err=True)
+        sys.exit(1)
 
 
 @cli.group()
@@ -261,6 +280,15 @@ def status():
     click.echo(f"Failed: {stats['failed']}")
     click.echo(f"Dead (DLQ): {stats['dead']}")
     
+    # Show execution metrics if available
+    if 'execution_metrics' in stats and stats['execution_metrics']['total_completed'] > 0:
+        metrics = stats['execution_metrics']
+        click.echo(f"\n=== Execution Metrics ===")
+        click.echo(f"Success Rate: {stats.get('success_rate', 0):.1f}%")
+        click.echo(f"Avg Execution Time: {metrics['avg_execution_time']:.2f}s")
+        click.echo(f"Min Execution Time: {metrics['min_execution_time']:.2f}s")
+        click.echo(f"Max Execution Time: {metrics['max_execution_time']:.2f}s")
+    
     # Check active workers (cross-platform)
     pid_file = "queuectl.workers.pid"
     is_windows = platform.system() == 'Windows'
@@ -316,6 +344,14 @@ def list(state: Optional[str]):
             "created_at": job['created_at'],
             "updated_at": job['updated_at']
         }
+        if job.get('priority') is not None:
+            output['priority'] = job['priority']
+        if job.get('timeout'):
+            output['timeout'] = job['timeout']
+        if job.get('run_at'):
+            output['run_at'] = job['run_at']
+        if job.get('execution_time'):
+            output['execution_time'] = job['execution_time']
         if job.get('error_message'):
             output['error_message'] = job['error_message']
         click.echo(json.dumps(output, indent=2))
@@ -365,6 +401,24 @@ def retry(job_id: str):
     click.echo(f"Job '{job_id}' reset and moved back to pending queue")
 
 
+@cli.command()
+@click.argument('job_id')
+def logs(job_id: str):
+    """Show output logs for a job"""
+    storage = get_storage()
+    
+    job = storage.get_job(job_id)
+    if not job:
+        click.echo(f"Error: Job '{job_id}' not found", err=True)
+        sys.exit(1)
+    
+    if job.get('output_logs'):
+        click.echo(f"\n=== Output Logs for Job {job_id} ===")
+        click.echo(job['output_logs'])
+    else:
+        click.echo(f"No output logs available for job '{job_id}'")
+
+
 @cli.group()
 def config():
     """Manage configuration"""
@@ -407,6 +461,16 @@ def get(key: Optional[str]):
         all_config = cfg.get_all()
         for k, v in all_config.items():
             click.echo(f"{k} = {v}")
+
+
+@cli.command()
+@click.option('--host', default='127.0.0.1', help='Host to bind to')
+@click.option('--port', default=5000, type=int, help='Port to bind to')
+@click.option('--debug', is_flag=True, help='Enable debug mode')
+def dashboard(host: str, port: int, debug: bool):
+    """Start the web dashboard for monitoring"""
+    from .dashboard import run_dashboard
+    run_dashboard(host=host, port=port, debug=debug)
 
 
 if __name__ == '__main__':
